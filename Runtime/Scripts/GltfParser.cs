@@ -22,6 +22,9 @@ public class GltfParser
     Gltf gltf;
     AssetCache cache;
 
+    /// <summary>Raw GLB, for the material extensions arfcore does not expose. Optional.</summary>
+    public byte[] glbBytes;
+
     public GltfParser(Gltf gltf, AssetCache cache = null) { 
         this.gltf = gltf; 
         this.cache = cache;
@@ -114,7 +117,19 @@ public class GltfParser
         unityMesh.triangles = unityTriangles;
         unityMesh.RecalculateNormals();
 
-        Shader shader = UnityTools.GetStandardShader();
+        GltfMaterialExtensions.AnisotropicMaterial hair = GetHairMaterial(primitive);
+        Shader hairShader = null;
+        if (hair != null)
+        {
+            hairShader = Resources.Load<Shader>("UnityARF/ArfHair");
+            if (hairShader == null || !hairShader.isSupported || !SetAuthoredNormals(unityMesh, primitive))
+            {
+                Debug.LogWarning($"Hair material of mesh {mesh.name} is not available, using the standard material");
+                hair = null;
+            }
+        }
+
+        Shader shader = hair != null ? hairShader : UnityTools.GetStandardShader();
         if (shader == null) {
             throw new Exception("Shader was not found");
         }
@@ -162,13 +177,23 @@ public class GltfParser
                         throw new Exception($"Invalid or unsupported pixel format {pixelFormat}");
                     }
 
-                    Texture2D unityTexture = new Texture2D(width, height, textureFormat, false);
+                    Texture2D unityTexture = new Texture2D(width, height, textureFormat, hair != null);
                     if (cache != null) {
                         cache.AddTexture($"{texture.GetPropertyIndex():D4}", unityTexture);
                     }
                     byte[] bytes = pixels.GetValues<byte>();
-                    unityTexture.LoadRawTextureData(bytes);
-                    unityTexture.Apply();
+                    if (hair != null)
+                    {
+                        unityTexture.SetPixelData(bytes, 0);
+                        unityTexture.filterMode = FilterMode.Trilinear;
+                        unityTexture.anisoLevel = 4;
+                        unityTexture.Apply(true, cache == null);
+                    }
+                    else
+                    {
+                        unityTexture.LoadRawTextureData(bytes);
+                        unityTexture.Apply();
+                    }
                     unityMaterial.mainTexture = unityTexture;
 
                     if (cache != null) {
@@ -181,6 +206,10 @@ public class GltfParser
         if (!foundTexture)
         {
             unityMaterial.color = Color.white;
+        }
+        if (hair != null)
+        {
+            SetHairMaterial(unityMaterial, primitive.material, hair);
         }
         if (Application.isPlaying) {
             renderer.material = unityMaterial;
@@ -298,6 +327,49 @@ public class GltfParser
             var updater = renderer.gameObject.AddComponent<GaussianStitchingUpdater>();
             updater.Initialize(model, bakedMesh, indexValues);
         }
+    }
+
+    // Hair cards: a cutout material declaring KHR_materials_anisotropy. Other anisotropic materials are left alone.
+    private GltfMaterialExtensions.AnisotropicMaterial GetHairMaterial(Primitive primitive)
+    {
+        if (glbBytes == null || !primitive.HasMaterial()) return null;
+        var material = primitive.material;
+        if (!material.HasAlphaMode() || material.alphaMode.ToString() != "MASK") return null;
+        if (!primitive.HasAttribute("NORMAL") || !primitive.HasAttribute("TANGENT")) return null;
+        return GltfMaterialExtensions.ReadAnisotropy(glbBytes, material.GetPropertyIndex());
+    }
+
+    private static bool SetAuthoredNormals(UnityEngine.Mesh unityMesh, Primitive primitive)
+    {
+        DataTree normals = primitive.GetAttribute("NORMAL").GetTensor();
+        DataTree tangents = primitive.GetAttribute("TANGENT").GetTensor();
+        int vertexCount = unityMesh.vertexCount;
+        if (normals.GetTensorSize(0) != vertexCount || tangents.GetTensorSize(0) != vertexCount ||
+            normals.GetTensorSize(1) != 3 || tangents.GetTensorSize(1) != 4)
+            return false;
+        float[] normalValues = normals.GetValues<float>();
+        float[] tangentValues = tangents.GetValues<float>();
+        var unityNormals = new Vector3[vertexCount];
+        var unityTangents = new Vector4[vertexCount];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            // Same X flip as the vertices, which also flips the handedness of the tangent frame.
+            unityNormals[i] = new Vector3(-normalValues[3 * i], normalValues[3 * i + 1], normalValues[3 * i + 2]);
+            unityTangents[i] = new Vector4(-tangentValues[4 * i], tangentValues[4 * i + 1], tangentValues[4 * i + 2], -tangentValues[4 * i + 3]);
+        }
+        unityMesh.normals = unityNormals;
+        unityMesh.tangents = unityTangents;
+        return true;
+    }
+
+    private static void SetHairMaterial(UnityEngine.Material unityMaterial, Interdigital.Gltf2.Material material,
+        GltfMaterialExtensions.AnisotropicMaterial hair)
+    {
+        unityMaterial.SetFloat("_Cutoff", material.HasAlphaCutoff() ? (float)material.alphaCutoff : 0.5f);
+        unityMaterial.SetFloat("_ClipThreshold", QualitySettings.antiAliasing > 1 ? 0.01f : 0.5f);
+        unityMaterial.SetFloat("_Roughness", Mathf.Max(hair.roughness, 0.05f));
+        unityMaterial.SetFloat("_AnisotropyStrength", hair.strength);
+        unityMaterial.SetVector("_StrandDirection", new Vector4(Mathf.Cos(hair.rotation), Mathf.Sin(hair.rotation), 0f, 0f));
     }
 
     private static DataTree[] LoadGaussianSphericalHarmonics(Primitive primitive, long gaussianCount)
