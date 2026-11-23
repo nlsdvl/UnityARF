@@ -49,7 +49,7 @@ namespace Interdigital.Arf
             }
 
             // Positions stay in mesh-local space; the merged renderer applies the avatar transform.
-            source.BakeMesh(snapshot, false);
+            source.BakeMesh(snapshot, true);
             if (readVertices || Baked != null)
                 snapshot.GetVertices(vertices);
             HasSnapshot = true;
