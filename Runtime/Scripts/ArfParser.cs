@@ -348,6 +348,9 @@ public class ArfParser
             cache.baseName = $"data{geometry.GetPropertyId():D4}:";
         }
         GltfParser gltfParser = new GltfParser(gltf, cache);
+        if (gltf.HasExtensionsUsed() && Array.IndexOf(gltf.GetExtensionsUsed(), GltfMaterialExtensions.Anisotropy) >= 0) {
+            gltfParser.glbBytes = arf.GetFileProvider().GetData(geometry.uri);
+        }
         gltfParser.SetMesh(renderer, gltfParser.GetFirstMesh(), options);
         if (cache != null) { 
             cache.baseName = "";
